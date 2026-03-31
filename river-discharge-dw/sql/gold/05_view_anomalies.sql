@@ -21,7 +21,7 @@
 --
 -- Dependencias: silver.flow_daily
 -- Ejecucion :
---   psql -d <base> -f sql/gold/05_view_anomalies.sql
+--   sudo -u postgres psql -d caudales -f sql/gold/05_view_anomalies.sql
 -- Consulta :
 --   SELECT * FROM gold.flow_monthly_anomalies
 --   WHERE year = 2015 ORDER BY month;
