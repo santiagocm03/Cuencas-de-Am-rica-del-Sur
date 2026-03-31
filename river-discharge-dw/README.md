@@ -9,8 +9,8 @@ Pipeline con tres capas (Medallion Architecture):
 | Capa | Esquema | Proposito |
 |------|---------|-----------|
 | **Bronze** | `bronze` | Ingesta cruda de CSVs heterogeneos (sin transformacion) |
-| **Silver** | `silver` | Datos limpios, armonizados y agregados mensualmente. NULL indica mes sin observacion |
-| **Gold** | `gold` | Climatologia, imputacion de huecos y anomalias estandarizadas (z-scores) |
+| **Silver** | `silver` | Datos diarios limpios y armonizados. NULL indica dia sin observacion. |
+| **Gold** | `gold` | Agregacion mensual, climatologia, imputacion de huecos y anomalias estandarizadas (z-scores) |
 
 ## Estaciones
 
@@ -24,6 +24,7 @@ Pipeline con tres capas (Medallion Architecture):
 | Timbues | Parana | Parana | Argentina |
 
 ## Estructura del proyecto
+
 
 ```
 caudales-dw/
@@ -39,14 +40,16 @@ caudales-dw/
     ├── 00_init_schemas.sql           # Crear esquemas bronze/silver/gold
     ├── bronze/
     │   ├── 01_ddl.sql                # Tablas de ingesta cruda
-    │   ├── 02_load_insert.sql        # Carga de CSVs (rutas relativas)
-    │   └── 03_profiling.sql          # Profiling de tipos antes de transformar
+    │   └── 02_load_insert.sql        # Carga de CSVs (rutas relativas)
     ├── silver/
     │   ├── 03_ddl.sql                # Tabla de caudales mensuales limpios
-    │   └── 04_insert.sql             # Limpieza y agregacion (sin imputacion)
+    │   └── 04_insert.sql             # Limpieza, agregacion e imputacion
     ├── gold/
-        └── 05_view_anomalies.sql     # VIEW: climatologia + imputacion + z-scores
-    
+    │   └── 05_view_anomalies.sql     # VIEW de anomalias (z-scores)
+    └── tests/
+        ├── test_silver.sql           # Validaciones de integridad Silver
+        └── test_gold.sql             # Tests sobre gold.flow_monthly_anomalies
+
  
 ```
 
@@ -72,6 +75,10 @@ psql -d <base> -f sql/silver/04_insert.sql
 # 5. Crear vista gold de anomalias
 psql -d <base> -f sql/gold/05_view_anomalies.sql
 
+# 6. Ejecutar tests de calidad (opcional)
+psql -d <base> -f sql/test/test_silver.sql
+psql -d <base> -f sql/test/test_gold.sql
+
 
 > **Nota:** `02_load_insert.sql` usa rutas relativas (`./data/raw/...`), por eso es necesario ejecutar `psql` desde la raiz del repositorio.
 
@@ -95,18 +102,24 @@ La salida de este script es la evidencia que justifica los tipos declarados en `
 ### Silver (limpieza y armonizacion)
 Para cada estacion aplica un patron canonico de tres pasos:
 
-1. **Parsing** — extraer campos del formato crudo (split, cast, reemplazo de coma decimal)
-2. **Limpieza** — filtros de calidad (regex numericos, rangos fisicos, outliers)
-3. **Agregacion** — promedio diario a mensual (`AVG`)
+1. Parsing — extraer campos del formato crudo (split, cast, reemplazo de coma decimal)
 
-Silver entrega el dato observado tal como existe. Los meses sin observacion quedan como `NULL`. No se imputa en esta capa.
+2. Limpieza — filtros de calidad (regex numericos, rangos fisicos, outliers)
+
+3. Almacenamiento — se guarda en silver.flow_daily con granularidad diaria (una fila por año, mes, día). Los dias sin observacion quedan como NULL.
+
+Silver entrega el dato observado tal como existe. No se imputa ni se agrega a nivel mensual en esta capa.
 
 ### Gold (climatologia, imputacion y anomalias)
-Vista que ejecuta tres operaciones en secuencia:
+Vista gold.flow_monthly_anomalies que ejecuta cuatro operaciones en secuencia:
 
-1. **Climatologia** — calcula media y desviacion estandar por estacion y mes del anio, usando unicamente valores observados de Silver
-2. **Imputacion** — rellena los `NULL` de Silver con la climatologia mensual correspondiente. Cada fila incluye una columna `*_imputado` que indica si el valor es observado (`FALSE`) o imputado (`TRUE`)
-3. **Z-score** — estandariza cada valor respecto a su climatologia:
+1. Agregacion diaria → mensual — promedio de los valores diarios por estacion y mes (Timbues se trata directamente como mensual).
+
+2. Climatologia — calcula media y desviacion estandar por estacion y mes del anio, usando unicamente valores observados de Silver.
+
+3. Imputacion — rellena los NULL de Silver con la climatologia mensual correspondiente. Cada fila incluye columnas *_imputado que indican si el valor es observado (FALSE) o imputado (TRUE).
+
+Z-score — estandariza cada valor respecto a su climatologia
 
 ```
 z = (valor - media_mensual) / desviacion_estandar_mensual
@@ -114,7 +127,46 @@ z = (valor - media_mensual) / desviacion_estandar_mensual
 
 Al ser una `VIEW`, se recalcula automaticamente cuando los datos de Silver cambian.
 
+### Tests de calidad
+
+##Silver (test_silver.sql)
+Verifica la integridad de silver.flow_daily:
+
+1.Tabla no vacia
+
+2. No duplicados en clave primaria
+
+3. Meses y dias dentro de rangos
+
+4. Caudales positivos y dentro de umbrales fisicos
+
+5. Conteos minimos por estacion
+
+6. Rango temporal razonable
+
+7. Timbues siempre con day=1 (fuente mensual)
+
+##Gold (test_gold.sql)
+Valida la vista gold.flow_monthly_anomalies:
+
+1. Vista no vacia
+
+2. Numero de filas coincide con meses distintos en Silver
+
+3. Media de anomalias por estacion-mes ≈ 0
+
+4. Desviacion estandar por estacion-mes ≈ 1 (tolerancias ajustadas por longitud de serie e imputacion)
+
+5. No hay anomalias extremas (|z| > 5)
+
+6. Coherencia con datos observados en Silver
+
+7. Columnas *_imputado nunca son NULL
+
+Ambos scripts terminan con EXCEPTION ante cualquier fallo y emiten un resumen de PASS si todas las validaciones son exitosas.
+
 ## Tecnologias
 
 - PostgreSQL (ETL y analitica en SQL puro)
 - Sin dependencias externas (no Python, no dbt)
+
