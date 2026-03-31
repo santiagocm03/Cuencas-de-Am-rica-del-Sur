@@ -13,7 +13,7 @@
 --
 -- Dependencias: 02_load_insert.sql (bronze cargado)
 -- Ejecucion :
---   sudo -u postgres psql -d caudales -f sql/bronze/03_profiling.sql
+--   sudo -u postgres psql -d postgres -f sql/bronze/03_profiling.sql
 -- ==========================================================
 
 \set ON_ERROR_STOP on

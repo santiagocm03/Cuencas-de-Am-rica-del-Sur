@@ -1,33 +1,28 @@
 -- ==========================================================
 -- 04_insert.sql  (Silver)
 -- ==========================================================
--- Proposito : Transformar datos crudos de bronze a caudales
---             diarios limpios en silver.flow_daily.
+-- Proposito : Parsear y limpiar cada tabla bronze en su
+--             correspondiente tabla silver con tipos correctos.
 --
---             Cada estacion sigue el mismo patron canonico:
---               1. parsing  — extraer campos del dato crudo
+--             Patron canonico por estacion:
+--               1. parsing  — castear TEXT a tipos correctos
 --               2. limpieza — filtrar registros invalidos
 --
 --             Lo que NO hace este script (pertenece a Gold):
+--               - Unir estaciones en formato wide
 --               - Agregar de diario a mensual
---               - Calcular climatologia historica
+--               - Calcular climatologia
 --               - Imputar huecos
---               - Calcular anomalias o z-scores
---
---             Los dias sin observacion quedan como NULL en
---             silver.flow_daily. Gold decide que hacer con
---             esos huecos al agregar a mensual.
---
--- Nota sobre Timbues: la fuente ya viene en frecuencia mensual.
---             Se inserta con day=1 por convencion para mantener
---             la estructura de la tabla.
+--               - Calcular z-scores
 --
 -- Dependencias: 03_ddl.sql (silver), 02_load_insert.sql (bronze)
 -- Ejecucion :
---   sudo -u postgres psql -d caudales -f sql/silver/04_insert.sql
+--   sudo -u postgres psql -d postgres -f sql/silver/04_insert.sql
 -- ==========================================================
 
 \set ON_ERROR_STOP on
+
+SET client_min_messages = NOTICE;
 
 \echo '========================================'
 \echo 'INICIO TRANSFORMACION SILVER'
@@ -37,8 +32,7 @@
 -- ==========================================================
 -- CALAMAR  (Rio Magdalena, Colombia)
 -- ==========================================================
--- Fuente: bronze.calamar (21 columnas TEXT)
--- Parsing:  fecha::date, valor::double precision
+-- Bronze: 21 columnas TEXT
 -- Limpieza:
 --   - Solo estacion 'CALAMAR' (sin sufijos entre corchetes)
 --   - Solo serie 'Caudal medio diario'
@@ -47,38 +41,43 @@
 -- ==========================================================
 \echo 'Procesando SILVER - Calamar...'
 
-INSERT INTO silver.flow_daily (year, month, day, calamar_daily)
-WITH parsing AS (
-    SELECT
-        fecha::date                      AS fecha,
-        nombre_estacion,
-        descripcion_serie,
-        valor
-    FROM bronze.calamar
-    WHERE fecha IS NOT NULL
-      AND valor IS NOT NULL
-),
-limpieza AS (
-    SELECT
-        fecha,
-        valor::double precision AS valor_num
-    FROM parsing
-    WHERE
-        regexp_replace(nombre_estacion, '\s*\[.*\]', '') = 'CALAMAR'
-        AND descripcion_serie = 'Caudal medio diario'
-        AND fecha < DATE '2017-01-01'
-        AND valor ~ '^[0-9]+(\.[0-9]+)?$'
-        AND valor::double precision > 0
-        AND valor::double precision <= 16000
-)
+TRUNCATE silver.calamar;
+INSERT INTO silver.calamar
 SELECT
-    EXTRACT(YEAR  FROM fecha)::int AS year,
-    EXTRACT(MONTH FROM fecha)::int AS month,
-    EXTRACT(DAY   FROM fecha)::int AS day,
-    valor_num                      AS calamar_daily
-FROM limpieza
-ON CONFLICT (year, month, day)
-DO UPDATE SET calamar_daily = EXCLUDED.calamar_daily;
+    codigo_estacion,
+    nombre_estacion,
+    REPLACE(latitud,  '.', '')::double precision / 1e9  AS latitud,
+    REPLACE(longitud, '.', '')::double precision / 1e9  AS longitud,
+    altitud::double precision,
+    categoria,
+    entidad,
+    area_operativa,
+    departamento,
+    municipio,
+    CASE WHEN fecha_instalacion IS NOT NULL AND fecha_instalacion <> ''
+         THEN to_timestamp(fecha_instalacion, 'DD/MM/YYYY HH24:MI')
+         ELSE NULL END                                  AS fecha_instalacion,
+    CASE WHEN fecha_suspension IS NOT NULL AND fecha_suspension <> ''
+         THEN to_timestamp(fecha_suspension, 'DD/MM/YYYY HH24:MI')
+         ELSE NULL END                                  AS fecha_suspension,
+    id_parametro,
+    etiqueta,
+    descripcion_serie,
+    frecuencia,
+    fecha::date,
+    valor::double precision,
+    grado::integer,
+    calificador,
+    nivel_aprobacion::integer
+FROM bronze.calamar
+WHERE
+    regexp_replace(nombre_estacion, '\s*\[.*\]', '') = 'CALAMAR'
+    AND descripcion_serie = 'Caudal medio diario'
+    AND fecha < '2017-01-01'
+    AND valor IS NOT NULL
+    AND valor ~ '^[0-9]+(\.[0-9]+)?$'
+    AND valor::double precision > 0
+    AND valor::double precision <= 16000;
 
 \echo 'OK - Calamar'
 
@@ -86,48 +85,44 @@ DO UPDATE SET calamar_daily = EXCLUDED.calamar_daily;
 -- ==========================================================
 -- CIUDAD BOLIVAR  (Rio Orinoco, Venezuela)
 -- ==========================================================
--- Fuente: bronze.ciudad_bolivar (raw_line TEXT)
--- Estructura del raw_line (separador ';'):
---   campo 1: id_estacion
---   campo 2: nombre
---   campo 3: fecha (DD/MM/YYYY HH24:MI)
---   campo 4: valor (coma como separador decimal)
---   campo 5: origen
+-- Bronze: raw_line con 7 campos separados por ';'
+--   campo 1: id_station
+--   campo 2: nom
+--   campo 3: fecha (D/MM/YYYY HH24:MI)
+--   campo 4: valor (coma decimal)
+--   campo 5: origine
+--   campo 6: qualite
+--   campo 7: vacio (trailing semicolon)
 -- Limpieza:
---   - Solo lineas que comienzan con digito (excluir headers)
+--   - Solo lineas que comienzan con digito
 --   - Reemplazar coma decimal por punto
 --   - Descartar valores NULL o no positivos
 -- ==========================================================
 \echo 'Procesando SILVER - Ciudad Bolivar...'
 
-INSERT INTO silver.flow_daily (year, month, day, bolivar_daily)
+TRUNCATE silver.ciudad_bolivar;
+INSERT INTO silver.ciudad_bolivar
 WITH parsing AS (
     SELECT
+        split_part(raw_line, ';', 1)                         AS id_station,
+        split_part(raw_line, ';', 2)                         AS nom,
         to_timestamp(
             split_part(raw_line, ';', 3),
             'DD/MM/YYYY HH24:MI'
-        )                                            AS fecha_ts,
+        )                                                    AS fecha,
         REPLACE(
-            NULLIF(split_part(raw_line, ';', 4), ''),
+            NULLIF(TRIM(split_part(raw_line, ';', 4)), ''),
             ',', '.'
-        )::double precision                          AS valor_num
+        )::double precision                                  AS valor,
+        NULLIF(TRIM(split_part(raw_line, ';', 5)), '')       AS origine,
+        NULLIF(TRIM(split_part(raw_line, ';', 6)), '')       AS qualite
     FROM bronze.ciudad_bolivar
     WHERE raw_line ~ '^[0-9]'
-),
-limpieza AS (
-    SELECT fecha_ts, valor_num
-    FROM parsing
-    WHERE valor_num IS NOT NULL
-      AND valor_num > 0
 )
-SELECT
-    EXTRACT(YEAR  FROM fecha_ts)::int AS year,
-    EXTRACT(MONTH FROM fecha_ts)::int AS month,
-    EXTRACT(DAY   FROM fecha_ts)::int AS day,
-    valor_num                         AS bolivar_daily
-FROM limpieza
-ON CONFLICT (year, month, day)
-DO UPDATE SET bolivar_daily = EXCLUDED.bolivar_daily;
+SELECT id_station, nom, fecha, valor, origine, qualite
+FROM parsing
+WHERE valor IS NOT NULL
+  AND valor > 0;
 
 \echo 'OK - Ciudad Bolivar'
 
@@ -135,8 +130,13 @@ DO UPDATE SET bolivar_daily = EXCLUDED.bolivar_daily;
 -- ==========================================================
 -- MANAOS  (Rio Negro / Amazonas, Brasil)
 -- ==========================================================
--- Fuente: bronze.manaos (raw_line TEXT)
--- Estructura del raw_line: identica a Ciudad Bolivar.
+-- Bronze: raw_line con 6 campos separados por ';'
+--   campo 1: id_station
+--   campo 2: nom
+--   campo 3: fecha (D/MM/YYYY HH24:MI)
+--   campo 4: valor (coma decimal)
+--   campo 5: origine
+--   campo 6: qualite
 -- Limpieza:
 --   - Solo lineas que comienzan con digito
 --   - Reemplazar coma decimal por punto
@@ -144,34 +144,29 @@ DO UPDATE SET bolivar_daily = EXCLUDED.bolivar_daily;
 -- ==========================================================
 \echo 'Procesando SILVER - Manaos...'
 
-INSERT INTO silver.flow_daily (year, month, day, manaos_daily)
+TRUNCATE silver.manaos;
+INSERT INTO silver.manaos
 WITH parsing AS (
     SELECT
+        split_part(raw_line, ';', 1)                         AS id_station,
+        split_part(raw_line, ';', 2)                         AS nom,
         to_timestamp(
             split_part(raw_line, ';', 3),
             'DD/MM/YYYY HH24:MI'
-        )                                            AS fecha_ts,
+        )                                                    AS fecha,
         REPLACE(
-            NULLIF(split_part(raw_line, ';', 4), ''),
+            NULLIF(TRIM(split_part(raw_line, ';', 4)), ''),
             ',', '.'
-        )::double precision                          AS valor_num
+        )::double precision                                  AS valor,
+        NULLIF(TRIM(split_part(raw_line, ';', 5)), '')       AS origine,
+        NULLIF(TRIM(split_part(raw_line, ';', 6)), '')       AS qualite
     FROM bronze.manaos
     WHERE raw_line ~ '^[0-9]'
-),
-limpieza AS (
-    SELECT fecha_ts, valor_num
-    FROM parsing
-    WHERE valor_num IS NOT NULL
-      AND valor_num > 0
 )
-SELECT
-    EXTRACT(YEAR  FROM fecha_ts)::int AS year,
-    EXTRACT(MONTH FROM fecha_ts)::int AS month,
-    EXTRACT(DAY   FROM fecha_ts)::int AS day,
-    valor_num                         AS manaos_daily
-FROM limpieza
-ON CONFLICT (year, month, day)
-DO UPDATE SET manaos_daily = EXCLUDED.manaos_daily;
+SELECT id_station, nom, fecha, valor, origine, qualite
+FROM parsing
+WHERE valor IS NOT NULL
+  AND valor > 0;
 
 \echo 'OK - Manaos'
 
@@ -179,40 +174,35 @@ DO UPDATE SET manaos_daily = EXCLUDED.manaos_daily;
 -- ==========================================================
 -- OBIDOS  (Rio Amazonas, Brasil)
 -- ==========================================================
--- Fuente: bronze.obidos (5 columnas TEXT)
--- Columnas: id_estacion, nombre, fecha, valor, origen
+-- Bronze: 5 columnas TEXT
+--   id_station, nom, fecha (DD/MM/YYYY HH24:MI),
+--   valor (coma decimal), origine
 -- Limpieza:
 --   - Reemplazar coma decimal por punto
 --   - Descartar valores NULL o no positivos
 -- ==========================================================
 \echo 'Procesando SILVER - Obidos...'
 
-INSERT INTO silver.flow_daily (year, month, day, obidos_daily)
+TRUNCATE silver.obidos;
+INSERT INTO silver.obidos
 WITH parsing AS (
     SELECT
-        to_timestamp(fecha, 'DD/MM/YYYY HH24:MI')      AS fecha_ts,
+        id_estacion                                          AS id_station,
+        nombre                                               AS nom,
+        to_timestamp(fecha, 'DD/MM/YYYY HH24:MI')           AS fecha,
         REPLACE(
-            NULLIF(valor, ''),
+            NULLIF(TRIM(valor), ''),
             ',', '.'
-        )::double precision                             AS valor_num
+        )::double precision                                  AS valor,
+        origen                                               AS origine
     FROM bronze.obidos
     WHERE fecha IS NOT NULL
       AND valor IS NOT NULL
-),
-limpieza AS (
-    SELECT fecha_ts, valor_num
-    FROM parsing
-    WHERE valor_num IS NOT NULL
-      AND valor_num > 0
 )
-SELECT
-    EXTRACT(YEAR  FROM fecha_ts)::int AS year,
-    EXTRACT(MONTH FROM fecha_ts)::int AS month,
-    EXTRACT(DAY   FROM fecha_ts)::int AS day,
-    valor_num                         AS obidos_daily
-FROM limpieza
-ON CONFLICT (year, month, day)
-DO UPDATE SET obidos_daily = EXCLUDED.obidos_daily;
+SELECT id_station, nom, fecha, valor, origine
+FROM parsing
+WHERE valor IS NOT NULL
+  AND valor > 0;
 
 \echo 'OK - Obidos'
 
@@ -220,43 +210,48 @@ DO UPDATE SET obidos_daily = EXCLUDED.obidos_daily;
 -- ==========================================================
 -- TABATINGA  (Rio Amazonas, Brasil)
 -- ==========================================================
--- Fuente: bronze.tabatinga (raw_line TEXT)
--- Estructura del raw_line: identica a Ciudad Bolivar y Manaos.
+-- Bronze: raw_line con 7 campos separados por ';'
+--   campo 1: id_station
+--   campo 2: nom
+--   campo 3: fecha (D/MM/YYYY HH24:MI)
+--   campo 4: valor (coma decimal)
+--   campo 5: origine
+--   campo 6: qualite
+--   campo 7: valor_medio_mensual (coma decimal, precalculado)
 -- Limpieza:
 --   - Solo lineas que comienzan con digito
 --   - Reemplazar coma decimal por punto
---   - Descartar valores NULL o no positivos
+--   - Descartar valores NULL o no positivos en campo principal
 -- ==========================================================
 \echo 'Procesando SILVER - Tabatinga...'
 
-INSERT INTO silver.flow_daily (year, month, day, tabatinga_daily)
+TRUNCATE silver.tabatinga;
+INSERT INTO silver.tabatinga
 WITH parsing AS (
     SELECT
+        split_part(raw_line, ';', 1)                         AS id_station,
+        split_part(raw_line, ';', 2)                         AS nom,
         to_timestamp(
             split_part(raw_line, ';', 3),
             'DD/MM/YYYY HH24:MI'
-        )                                            AS fecha_ts,
+        )                                                    AS fecha,
         REPLACE(
-            NULLIF(split_part(raw_line, ';', 4), ''),
+            NULLIF(TRIM(split_part(raw_line, ';', 4)), ''),
             ',', '.'
-        )::double precision                          AS valor_num
+        )::double precision                                  AS valor,
+        NULLIF(TRIM(split_part(raw_line, ';', 5)), '')       AS origine,
+        NULLIF(TRIM(split_part(raw_line, ';', 6)), '')       AS qualite,
+        REPLACE(
+            NULLIF(TRIM(split_part(raw_line, ';', 7)), ''),
+            ',', '.'
+        )::double precision                                  AS valor_medio_mensual
     FROM bronze.tabatinga
     WHERE raw_line ~ '^[0-9]'
-),
-limpieza AS (
-    SELECT fecha_ts, valor_num
-    FROM parsing
-    WHERE valor_num IS NOT NULL
-      AND valor_num > 0
 )
-SELECT
-    EXTRACT(YEAR  FROM fecha_ts)::int AS year,
-    EXTRACT(MONTH FROM fecha_ts)::int AS month,
-    EXTRACT(DAY   FROM fecha_ts)::int AS day,
-    valor_num                         AS tabatinga_daily
-FROM limpieza
-ON CONFLICT (year, month, day)
-DO UPDATE SET tabatinga_daily = EXCLUDED.tabatinga_daily;
+SELECT id_station, nom, fecha, valor, origine, qualite, valor_medio_mensual
+FROM parsing
+WHERE valor IS NOT NULL
+  AND valor > 0;
 
 \echo 'OK - Tabatinga'
 
@@ -264,14 +259,10 @@ DO UPDATE SET tabatinga_daily = EXCLUDED.tabatinga_daily;
 -- ==========================================================
 -- TIMBUES  (Rio Parana, Argentina)
 -- ==========================================================
--- Fuente: bronze.timbues (raw_line TEXT)
--- Estructura del raw_line (separador ';'):
+-- Bronze: raw_line con 2 campos separados por ';'
 --   campo 1: fecha (DD/MM/YYYY)
---   campo 2: caudal mensual (coma como separador decimal)
--- Nota: esta fuente ya viene en frecuencia mensual.
---       Se inserta con day=1 por convencion para mantener
---       la estructura de la tabla. Gold lo trata como
---       valor mensual directamente (sin AVG).
+--   campo 2: valor mensual (coma decimal)
+-- Nota: frecuencia mensual, no diaria.
 -- Limpieza:
 --   - Solo lineas que comienzan con digito
 --   - Reemplazar coma decimal por punto
@@ -279,34 +270,25 @@ DO UPDATE SET tabatinga_daily = EXCLUDED.tabatinga_daily;
 -- ==========================================================
 \echo 'Procesando SILVER - Timbues...'
 
-INSERT INTO silver.flow_daily (year, month, day, timbues_daily)
+TRUNCATE silver.timbues;
+INSERT INTO silver.timbues
 WITH parsing AS (
     SELECT
         to_date(
             split_part(raw_line, ';', 1),
             'DD/MM/YYYY'
-        )                                            AS fecha,
+        )                                                    AS fecha,
         REPLACE(
-            NULLIF(split_part(raw_line, ';', 2), ''),
+            NULLIF(TRIM(split_part(raw_line, ';', 2)), ''),
             ',', '.'
-        )::double precision                          AS valor_num
+        )::double precision                                  AS valor
     FROM bronze.timbues
     WHERE raw_line ~ '^[0-9]'
-),
-limpieza AS (
-    SELECT fecha, valor_num
-    FROM parsing
-    WHERE valor_num IS NOT NULL
-      AND valor_num > 0
 )
-SELECT
-    EXTRACT(YEAR  FROM fecha)::int AS year,
-    EXTRACT(MONTH FROM fecha)::int AS month,
-    1                              AS day,  -- convencion: fuente mensual
-    valor_num                      AS timbues_daily
-FROM limpieza
-ON CONFLICT (year, month, day)
-DO UPDATE SET timbues_daily = EXCLUDED.timbues_daily;
+SELECT fecha, valor
+FROM parsing
+WHERE valor IS NOT NULL
+  AND valor > 0;
 
 \echo 'OK - Timbues'
 

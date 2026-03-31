@@ -7,7 +7,7 @@
 --             semi-estructurado se ingesta como raw_line TEXT.
 -- Dependencias: 00_init_schemas.sql
 -- Ejecucion :
---   sudo -u postgres psql -d caudales -f sql/bronze/01_ddl.sql
+--   sudo -u postgres psql -d postgres -f sql/bronze/01_ddl.sql
 -- ==========================================================
 
 

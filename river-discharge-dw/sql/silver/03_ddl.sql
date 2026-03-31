@@ -1,49 +1,129 @@
 -- ==========================================================
 -- 03_ddl.sql  (Silver)
 -- ==========================================================
--- Proposito : Crear la tabla de caudales diarios limpios
---             y armonizados. Consolida las 6 estaciones en
---             formato wide (una columna por estacion).
+-- Proposito : Crear una tabla limpia por estacion.
+--             Cada tabla replica las columnas del CSV original
+--             pero con tipos de dato correctos (no TEXT).
+--             La union de estaciones y agregacion mensual
+--             ocurre en Gold.
 -- Dependencias: 00_init_schemas.sql
 -- Ejecucion :
---   sudo -u postgres psql -d caudales -f sql/silver/03_ddl.sql
--- Notas:
---   - Valores en m3/s (metros cubicos por segundo).
---   - Granularidad diaria: una fila por (year, month, day).
---   - NULL indica ausencia de observacion para esa estacion-dia.
---   - La agregacion mensual, imputacion y z-scores pertenecen
---     a la capa Gold.
+--   sudo -u postgres psql -d postgres -f sql/silver/03_ddl.sql
 -- ==========================================================
 
 \set ON_ERROR_STOP on
 
-DROP TABLE IF EXISTS silver.flow_daily;
-
-CREATE TABLE silver.flow_daily (
-    year  INT NOT NULL,
-    month INT NOT NULL CHECK (month BETWEEN 1 AND 12),
-    day   INT NOT NULL CHECK (day   BETWEEN 1 AND 31),
-
-    calamar_daily    DOUBLE PRECISION,  -- Magdalena en Calamar (Colombia)
-    bolivar_daily    DOUBLE PRECISION,  -- Orinoco en Ciudad Bolivar (Venezuela)
-    manaos_daily     DOUBLE PRECISION,  -- Negro/Amazonas en Manaos (Brasil)
-    obidos_daily     DOUBLE PRECISION,  -- Amazonas en Obidos (Brasil)
-    tabatinga_daily  DOUBLE PRECISION,  -- Amazonas en Tabatinga (Brasil)
-    timbues_daily    DOUBLE PRECISION,  -- Parana en Timbues (Argentina)
-
-    CONSTRAINT pk_flow_daily PRIMARY KEY (year, month, day)
+-- ==========================================================
+-- CALAMAR (Rio Magdalena, Colombia)
+-- Fuente: IDEAM. 21 columnas. Frecuencia diaria.
+-- ==========================================================
+DROP TABLE IF EXISTS silver.calamar;
+CREATE TABLE silver.calamar (
+    codigo_estacion    TEXT,
+    nombre_estacion    TEXT,
+    latitud            DOUBLE PRECISION,
+    longitud           DOUBLE PRECISION,
+    altitud            DOUBLE PRECISION,
+    categoria          TEXT,
+    entidad            TEXT,
+    area_operativa     TEXT,
+    departamento       TEXT,
+    municipio          TEXT,
+    fecha_instalacion  TIMESTAMP,
+    fecha_suspension   TIMESTAMP,
+    id_parametro       TEXT,
+    etiqueta           TEXT,
+    descripcion_serie  TEXT,
+    frecuencia         TEXT,
+    fecha              DATE,
+    valor              DOUBLE PRECISION,
+    grado              INTEGER,
+    calificador        TEXT,
+    nivel_aprobacion   INTEGER
 );
 
--- ---- Metadatos de la tabla ----
-COMMENT ON TABLE silver.flow_daily IS
-    'Caudales diarios (m3/s) por estacion, limpios. NULL indica dia sin observacion. La agregacion mensual pertenece a Gold.';
+COMMENT ON TABLE silver.calamar IS
+    'Caudal diario limpio en Calamar - Rio Magdalena (m3/s). Fuente: IDEAM Colombia.';
 
-COMMENT ON COLUMN silver.flow_daily.year            IS 'Anio de la observacion';
-COMMENT ON COLUMN silver.flow_daily.month           IS 'Mes de la observacion (1-12)';
-COMMENT ON COLUMN silver.flow_daily.day             IS 'Dia de la observacion (1-31)';
-COMMENT ON COLUMN silver.flow_daily.calamar_daily   IS 'Caudal diario en Calamar - Rio Magdalena (m3/s)';
-COMMENT ON COLUMN silver.flow_daily.bolivar_daily   IS 'Caudal diario en Ciudad Bolivar - Rio Orinoco (m3/s)';
-COMMENT ON COLUMN silver.flow_daily.manaos_daily    IS 'Caudal diario en Manaos - Rio Negro/Amazonas (m3/s)';
-COMMENT ON COLUMN silver.flow_daily.obidos_daily    IS 'Caudal diario en Obidos - Rio Amazonas (m3/s)';
-COMMENT ON COLUMN silver.flow_daily.tabatinga_daily IS 'Caudal diario en Tabatinga - Rio Amazonas (m3/s)';
-COMMENT ON COLUMN silver.flow_daily.timbues_daily   IS 'Caudal diario en Timbues - Rio Parana (m3/s). Fuente ya viene en frecuencia mensual: day=1 por convencion.';
+-- ==========================================================
+-- CIUDAD BOLIVAR (Rio Orinoco, Venezuela)
+-- Fuente: GRDC / BNO. 6 columnas. Frecuencia diaria.
+-- ==========================================================
+DROP TABLE IF EXISTS silver.ciudad_bolivar;
+CREATE TABLE silver.ciudad_bolivar (
+    id_station  TEXT,
+    nom         TEXT,
+    fecha       TIMESTAMP,
+    valor       DOUBLE PRECISION,
+    origine     TEXT,
+    qualite     TEXT
+);
+
+COMMENT ON TABLE silver.ciudad_bolivar IS
+    'Caudal diario limpio en Ciudad Bolivar - Rio Orinoco (m3/s). Fuente: GRDC / BNO Venezuela.';
+
+-- ==========================================================
+-- MANAOS (Rio Negro / Amazonas, Brasil)
+-- Fuente: ANA Brasil / GRDC. 6 columnas. Frecuencia diaria.
+-- ==========================================================
+DROP TABLE IF EXISTS silver.manaos;
+CREATE TABLE silver.manaos (
+    id_station  TEXT,
+    nom         TEXT,
+    fecha       TIMESTAMP,
+    valor       DOUBLE PRECISION,
+    origine     TEXT,
+    qualite     TEXT
+);
+
+COMMENT ON TABLE silver.manaos IS
+    'Caudal diario limpio en Manaos - Rio Negro/Amazonas (m3/s). Fuente: ANA Brasil / GRDC.';
+
+-- ==========================================================
+-- OBIDOS (Rio Amazonas, Brasil)
+-- Fuente: ANA Brasil / GRDC. 5 columnas. Frecuencia diaria.
+-- ==========================================================
+DROP TABLE IF EXISTS silver.obidos;
+CREATE TABLE silver.obidos (
+    id_station  TEXT,
+    nom         TEXT,
+    fecha       TIMESTAMP,
+    valor       DOUBLE PRECISION,
+    origine     TEXT
+);
+
+COMMENT ON TABLE silver.obidos IS
+    'Caudal diario limpio en Obidos - Rio Amazonas (m3/s). Fuente: ANA Brasil / GRDC.';
+
+-- ==========================================================
+-- TABATINGA (Rio Amazonas, Brasil)
+-- Fuente: ANA Brasil / GRDC. 7 columnas. Frecuencia diaria.
+-- Campo 7 (valor_medio_mensual): caudal medio mensual
+-- precalculado en la fuente, se conserva como referencia.
+-- ==========================================================
+DROP TABLE IF EXISTS silver.tabatinga;
+CREATE TABLE silver.tabatinga (
+    id_station           TEXT,
+    nom                  TEXT,
+    fecha                TIMESTAMP,
+    valor                DOUBLE PRECISION,
+    origine              TEXT,
+    qualite              TEXT,
+    valor_medio_mensual  DOUBLE PRECISION
+);
+
+COMMENT ON TABLE silver.tabatinga IS
+    'Caudal diario limpio en Tabatinga - Rio Amazonas (m3/s). Fuente: ANA Brasil / GRDC.';
+
+-- ==========================================================
+-- TIMBUES (Rio Parana, Argentina)
+-- Fuente: INA Argentina. 2 columnas. Frecuencia mensual.
+-- ==========================================================
+DROP TABLE IF EXISTS silver.timbues;
+CREATE TABLE silver.timbues (
+    fecha  DATE,
+    valor  DOUBLE PRECISION
+);
+
+COMMENT ON TABLE silver.timbues IS
+    'Caudal mensual limpio en Timbues - Rio Parana (m3/s). Fuente: INA Argentina. Frecuencia mensual.';

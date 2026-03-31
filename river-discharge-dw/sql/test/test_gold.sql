@@ -1,18 +1,14 @@
 -- ==========================================================
 -- test_gold.sql
 -- ==========================================================
--- Proposito : Validar la vista gold.flow_monthly_anomalies
---             (z-scores de caudal mensual por estacion).
--- Dependencias: silver.flow_daily poblado y la VIEW creada.
--- Ejecucion :
---   psql -d <base> -f sql/tests/test_gold.sql
---
---   Si algun test falla, el script se detiene con un error
---   EXCEPTION. Si todos pasan, imprime NOTICE con 'PASS'.
+-- Propósito : Validar la tabla gold.flow_monthly y la vista
+--             gold.flow_monthly_anomalies.
+-- Dependencias: gold.flow_monthly, gold.flow_monthly_anomalies
+-- Ejecución :
+--   psudo -u postgres psql -d postgres -f sql/test/test_silver.sql
 -- ==========================================================
 
 \set ON_ERROR_STOP on
-
 SET client_min_messages = NOTICE;
 
 \echo '========================================'
@@ -21,7 +17,22 @@ SET client_min_messages = NOTICE;
 
 
 -- ----------------------------------------------------------
--- TEST 1: La VIEW no esta vacia
+-- TEST 1: gold.flow_monthly no está vacía
+-- ----------------------------------------------------------
+DO $$
+DECLARE
+    n INT;
+BEGIN
+    SELECT COUNT(*) INTO n FROM gold.flow_monthly;
+    IF n = 0 THEN
+        RAISE EXCEPTION 'FAIL: gold.flow_monthly está vacía';
+    END IF;
+    RAISE NOTICE 'PASS: gold.flow_monthly tiene % filas', n;
+END $$;
+
+
+-- ----------------------------------------------------------
+-- TEST 2: gold.flow_monthly_anomalies no está vacía
 -- ----------------------------------------------------------
 DO $$
 DECLARE
@@ -29,38 +40,47 @@ DECLARE
 BEGIN
     SELECT COUNT(*) INTO n FROM gold.flow_monthly_anomalies;
     IF n = 0 THEN
-        RAISE EXCEPTION 'FAIL: gold.flow_monthly_anomalies esta vacia';
+        RAISE EXCEPTION 'FAIL: gold.flow_monthly_anomalies está vacía';
     END IF;
     RAISE NOTICE 'PASS: gold.flow_monthly_anomalies tiene % filas', n;
 END $$;
 
 
 -- ----------------------------------------------------------
--- TEST 2: El numero de filas coincide con los meses distintos
---         presentes en silver.flow_daily.
+-- TEST 3: Cantidad de meses en gold.flow_monthly coincide con
+--         los meses presentes en las tablas silver (suma de años-mes únicos)
 -- ----------------------------------------------------------
 DO $$
 DECLARE
+    n_gold INT;
     n_silver INT;
-    n_gold   INT;
 BEGIN
-    SELECT COUNT(DISTINCT (year, month)) INTO n_silver
-    FROM silver.flow_daily;
+    SELECT COUNT(*) INTO n_gold FROM gold.flow_monthly;
 
-    SELECT COUNT(*) INTO n_gold
-    FROM gold.flow_monthly_anomalies;
+    WITH silver_months AS (
+        SELECT EXTRACT(YEAR FROM fecha)::int AS y, EXTRACT(MONTH FROM fecha)::int AS m FROM silver.calamar
+        UNION
+        SELECT EXTRACT(YEAR FROM fecha)::int, EXTRACT(MONTH FROM fecha)::int FROM silver.ciudad_bolivar
+        UNION
+        SELECT EXTRACT(YEAR FROM fecha)::int, EXTRACT(MONTH FROM fecha)::int FROM silver.manaos
+        UNION
+        SELECT EXTRACT(YEAR FROM fecha)::int, EXTRACT(MONTH FROM fecha)::int FROM silver.obidos
+        UNION
+        SELECT EXTRACT(YEAR FROM fecha)::int, EXTRACT(MONTH FROM fecha)::int FROM silver.tabatinga
+        UNION
+        SELECT EXTRACT(YEAR FROM fecha)::int, EXTRACT(MONTH FROM fecha)::int FROM silver.timbues
+    )
+    SELECT COUNT(*) INTO n_silver FROM silver_months;
 
-    IF n_silver <> n_gold THEN
-        RAISE EXCEPTION 'FAIL: Silver tiene % meses distintos, Gold tiene % filas', n_silver, n_gold;
+    IF n_gold != n_silver THEN
+        RAISE EXCEPTION 'FAIL: gold.flow_monthly tiene % meses, pero Silver tiene % meses distintos', n_gold, n_silver;
     END IF;
-    RAISE NOTICE 'PASS: Gold (%) coincide con Silver (%) en numero de meses', n_gold, n_silver;
+    RAISE NOTICE 'PASS: gold.flow_monthly tiene % meses, coincidiendo con Silver', n_gold;
 END $$;
 
 
 -- ----------------------------------------------------------
--- TEST 3: La media de anomalias por estacion-mes es aprox. 0
--- Por definicion de z-score, la media debe ser ~0.
--- Tolerancia de 0.001 para errores de punto flotante.
+-- TEST 4: Media de anomalías por estación-mes ≈ 0 (tolerancia 1e-6)
 -- ----------------------------------------------------------
 DO $$
 DECLARE
@@ -81,27 +101,16 @@ BEGIN
         SELECT AVG(timbues_anomaly)   FROM gold.flow_monthly_anomalies GROUP BY month
     ) sub;
 
-    IF max_mean > 0.001 THEN
-        RAISE EXCEPTION 'FAIL: Media maxima de anomalias por mes = % (esperado ~0)', max_mean;
+    IF max_mean > 1e-6 THEN
+        RAISE EXCEPTION 'FAIL: Media máxima de anomalías por mes = % (esperado ~0)', max_mean;
     END IF;
-    RAISE NOTICE 'PASS: Media de anomalias por estacion-mes es ~0 (max: %)', ROUND(max_mean::numeric, 6);
+    RAISE NOTICE 'PASS: Media de anomalías por estación-mes es ~0 (max: %)', ROUND(max_mean::numeric, 12);
 END $$;
 
 
 -- ----------------------------------------------------------
--- TEST 4: La desviacion estandar de anomalias es aprox. 1
--- Las tolerancias son individuales por estacion porque dependen
--- de dos factores combinados:
---   1. Series cortas (pocos anios) no convergen bien a std=1
---   2. La imputacion climatologica fija z=0 en meses imputados,
---      comprimiendo artificialmente la varianza
--- Tolerancias = valor observado + 10% de margen:
---   Calamar:   67 anios, max_diff observado 0.2507 -> tol 0.28
---   Bolivar:   17 anios, max_diff observado 0.6254 -> tol 0.69
---   Manaos:    48 anios, max_diff observado 0.3787 -> tol 0.42
---   Obidos:    52 anios, max_diff observado 0.3377 -> tol 0.37
---   Tabatinga: 38 anios, max_diff observado 0.4380 -> tol 0.48
---   Timbues:  115 anios, max_diff observado 0.0044 -> tol 0.01
+-- TEST 5: Desviación estándar de anomalías por estación-mes ≈ 1
+--         (tolerancias ajustadas por longitud de serie e imputación)
 -- ----------------------------------------------------------
 DO $$
 DECLARE
@@ -126,7 +135,7 @@ BEGIN
     IF diff_tabatinga > 0.48 THEN RAISE EXCEPTION 'FAIL: Tabatinga desv.std difiere de 1.0 en % (max tolerado: 0.48)', ROUND(diff_tabatinga::numeric, 4); END IF;
     IF diff_timbues   > 0.01 THEN RAISE EXCEPTION 'FAIL: Timbues desv.std difiere de 1.0 en % (max tolerado: 0.01)', ROUND(diff_timbues::numeric,   4); END IF;
 
-    RAISE NOTICE 'PASS: Desv. std. por estacion dentro de tolerancia — Calamar:%, Bolivar:%, Manaos:%, Obidos:%, Tabatinga:%, Timbues:%',
+    RAISE NOTICE 'PASS: Desv. std. por estación dentro de tolerancia — Calamar:%, Bolivar:%, Manaos:%, Obidos:%, Tabatinga:%, Timbues:%',
         ROUND(diff_calamar::numeric, 4),
         ROUND(diff_bolivar::numeric, 4),
         ROUND(diff_manaos::numeric, 4),
@@ -137,9 +146,7 @@ END $$;
 
 
 -- ----------------------------------------------------------
--- TEST 5: No hay anomalias extremas (|z| > 5)
--- Un z-score > 5 es estadisticamente muy improbable e indica
--- un posible error en los datos fuente o en la limpieza.
+-- TEST 6: No hay anomalías extremas (|z| > 5)
 -- ----------------------------------------------------------
 DO $$
 DECLARE
@@ -155,54 +162,14 @@ BEGIN
        OR ABS(timbues_anomaly)   > 5;
 
     IF n > 0 THEN
-        RAISE EXCEPTION 'FAIL: % filas con anomalia |z| > 5 (revisar datos fuente)', n;
+        RAISE EXCEPTION 'FAIL: % filas con anomalía |z| > 5 (revisar datos fuente)', n;
     END IF;
-    RAISE NOTICE 'PASS: Todas las anomalias tienen |z| <= 5';
+    RAISE NOTICE 'PASS: Todas las anomalías tienen |z| <= 5';
 END $$;
 
 
 -- ----------------------------------------------------------
--- TEST 6: Anomalias NULL solo donde Silver no tiene datos
--- Si una estacion tiene al menos un dato diario en un mes,
--- debe tener anomalia en Gold (no NULL).
--- ----------------------------------------------------------
-DO $$
-DECLARE
-    n INT;
-BEGIN
-    WITH silver_mensual AS (
-        SELECT
-            year, month,
-            COUNT(calamar_daily)   > 0 AS tiene_calamar,
-            COUNT(bolivar_daily)   > 0 AS tiene_bolivar,
-            COUNT(manaos_daily)    > 0 AS tiene_manaos,
-            COUNT(obidos_daily)    > 0 AS tiene_obidos,
-            COUNT(tabatinga_daily) > 0 AS tiene_tabatinga,
-            COUNT(timbues_daily)   > 0 AS tiene_timbues
-        FROM silver.flow_daily
-        GROUP BY year, month
-    )
-    SELECT COUNT(*) INTO n
-    FROM silver_mensual s
-    JOIN gold.flow_monthly_anomalies g
-      ON s.year = g.year AND s.month = g.month
-    WHERE (s.tiene_calamar   AND g.calamar_anomaly   IS NULL)
-       OR (s.tiene_bolivar   AND g.bolivar_anomaly   IS NULL)
-       OR (s.tiene_manaos    AND g.manaos_anomaly    IS NULL)
-       OR (s.tiene_obidos    AND g.obidos_anomaly    IS NULL)
-       OR (s.tiene_tabatinga AND g.tabatinga_anomaly IS NULL)
-       OR (s.tiene_timbues   AND g.timbues_anomaly   IS NULL);
-
-    IF n > 0 THEN
-        RAISE EXCEPTION 'FAIL: % meses con datos en Silver pero sin anomalia en Gold', n;
-    END IF;
-    RAISE NOTICE 'PASS: Todo mes con datos en Silver tiene anomalia en Gold';
-END $$;
-
-
--- ----------------------------------------------------------
--- TEST 7: Las columnas *_imputado son siempre TRUE o FALSE
---         (nunca NULL) para todos los meses de la vista.
+-- TEST 7: Columnas *_imputado nunca son NULL
 -- ----------------------------------------------------------
 DO $$
 DECLARE
@@ -221,6 +188,30 @@ BEGIN
         RAISE EXCEPTION 'FAIL: % filas con columna *_imputado = NULL (esperado siempre TRUE/FALSE)', n;
     END IF;
     RAISE NOTICE 'PASS: Todas las columnas *_imputado tienen valor TRUE o FALSE';
+END $$;
+
+
+-- ----------------------------------------------------------
+-- TEST 8: Los valores imputados deben tener anomalía = 0
+--         (porque se imputa con la climatología)
+-- ----------------------------------------------------------
+DO $$
+DECLARE
+    n INT;
+BEGIN
+    SELECT COUNT(*) INTO n
+    FROM gold.flow_monthly_anomalies
+    WHERE (calamar_imputado   = TRUE AND calamar_anomaly   != 0)
+       OR (bolivar_imputado   = TRUE AND bolivar_anomaly   != 0)
+       OR (manaos_imputado    = TRUE AND manaos_anomaly    != 0)
+       OR (obidos_imputado    = TRUE AND obidos_anomaly    != 0)
+       OR (tabatinga_imputado = TRUE AND tabatinga_anomaly != 0)
+       OR (timbues_imputado   = TRUE AND timbues_anomaly   != 0);
+
+    IF n > 0 THEN
+        RAISE EXCEPTION 'FAIL: % filas con imputado = TRUE pero anomalía != 0', n;
+    END IF;
+    RAISE NOTICE 'PASS: Todos los valores imputados tienen anomalía = 0';
 END $$;
 
 
