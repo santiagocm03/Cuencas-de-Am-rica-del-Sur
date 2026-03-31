@@ -2,18 +2,25 @@
 -- 04_insert.sql  (Silver)
 -- ==========================================================
 -- Proposito : Transformar datos crudos de bronze a caudales
---             mensuales limpios en silver.flow_monthly.
+--             diarios limpios en silver.flow_daily.
 --
 --             Cada estacion sigue el mismo patron canonico:
---               1. parsing   — extraer campos del dato crudo
---               2. limpieza  — filtrar registros invalidos
---               3. mensual   — agregar diario a mensual (AVG)
+--               1. parsing  — extraer campos del dato crudo
+--               2. limpieza — filtrar registros invalidos
 --
---           
+--             Lo que NO hace este script (pertenece a Gold):
+--               - Agregar de diario a mensual
+--               - Calcular climatologia historica
+--               - Imputar huecos
+--               - Calcular anomalias o z-scores
 --
---             Los meses sin observacion quedan como NULL en
---             silver.flow_monthly. Gold decide que hacer con
---             esos huecos.
+--             Los dias sin observacion quedan como NULL en
+--             silver.flow_daily. Gold decide que hacer con
+--             esos huecos al agregar a mensual.
+--
+-- Nota sobre Timbues: la fuente ya viene en frecuencia mensual.
+--             Se inserta con day=1 por convencion para mantener
+--             la estructura de la tabla.
 --
 -- Dependencias: 03_ddl.sql (silver), 02_load_insert.sql (bronze)
 -- Ejecucion :
@@ -37,11 +44,10 @@
 --   - Solo serie 'Caudal medio diario'
 --   - Datos hasta 2016-12 (cambio de sensor desde 2017)
 --   - Valor numerico positivo <= 16000 m3/s (umbral fisico)
--- Agregacion: AVG diario -> mensual
 -- ==========================================================
 \echo 'Procesando SILVER - Calamar...'
 
-INSERT INTO silver.flow_monthly (year, month, calamar_monthly)
+INSERT INTO silver.flow_daily (year, month, day, calamar_daily)
 WITH parsing AS (
     SELECT
         fecha::date                      AS fecha,
@@ -49,8 +55,8 @@ WITH parsing AS (
         descripcion_serie,
         valor
     FROM bronze.calamar
-    WHERE fecha  IS NOT NULL
-      AND valor  IS NOT NULL
+    WHERE fecha IS NOT NULL
+      AND valor IS NOT NULL
 ),
 limpieza AS (
     SELECT
@@ -64,19 +70,15 @@ limpieza AS (
         AND valor ~ '^[0-9]+(\.[0-9]+)?$'
         AND valor::double precision > 0
         AND valor::double precision <= 16000
-),
-mensual AS (
-    SELECT
-        EXTRACT(YEAR  FROM fecha)::int AS year,
-        EXTRACT(MONTH FROM fecha)::int AS month,
-        AVG(valor_num)                 AS calamar_monthly
-    FROM limpieza
-    GROUP BY 1, 2
 )
-SELECT year, month, calamar_monthly
-FROM mensual
-ON CONFLICT (year, month)
-DO UPDATE SET calamar_monthly = EXCLUDED.calamar_monthly;
+SELECT
+    EXTRACT(YEAR  FROM fecha)::int AS year,
+    EXTRACT(MONTH FROM fecha)::int AS month,
+    EXTRACT(DAY   FROM fecha)::int AS day,
+    valor_num                      AS calamar_daily
+FROM limpieza
+ON CONFLICT (year, month, day)
+DO UPDATE SET calamar_daily = EXCLUDED.calamar_daily;
 
 \echo 'OK - Calamar'
 
@@ -94,12 +96,11 @@ DO UPDATE SET calamar_monthly = EXCLUDED.calamar_monthly;
 -- Limpieza:
 --   - Solo lineas que comienzan con digito (excluir headers)
 --   - Reemplazar coma decimal por punto
---   - Descartar valores NULL
--- Agregacion: AVG diario -> mensual
+--   - Descartar valores NULL o no positivos
 -- ==========================================================
 \echo 'Procesando SILVER - Ciudad Bolivar...'
 
-INSERT INTO silver.flow_monthly (year, month, bolivar_monthly)
+INSERT INTO silver.flow_daily (year, month, day, bolivar_daily)
 WITH parsing AS (
     SELECT
         to_timestamp(
@@ -118,19 +119,15 @@ limpieza AS (
     FROM parsing
     WHERE valor_num IS NOT NULL
       AND valor_num > 0
-),
-mensual AS (
-    SELECT
-        EXTRACT(YEAR  FROM fecha_ts)::int AS year,
-        EXTRACT(MONTH FROM fecha_ts)::int AS month,
-        AVG(valor_num)                    AS bolivar_monthly
-    FROM limpieza
-    GROUP BY 1, 2
 )
-SELECT year, month, bolivar_monthly
-FROM mensual
-ON CONFLICT (year, month)
-DO UPDATE SET bolivar_monthly = EXCLUDED.bolivar_monthly;
+SELECT
+    EXTRACT(YEAR  FROM fecha_ts)::int AS year,
+    EXTRACT(MONTH FROM fecha_ts)::int AS month,
+    EXTRACT(DAY   FROM fecha_ts)::int AS day,
+    valor_num                         AS bolivar_daily
+FROM limpieza
+ON CONFLICT (year, month, day)
+DO UPDATE SET bolivar_daily = EXCLUDED.bolivar_daily;
 
 \echo 'OK - Ciudad Bolivar'
 
@@ -143,14 +140,11 @@ DO UPDATE SET bolivar_monthly = EXCLUDED.bolivar_monthly;
 -- Limpieza:
 --   - Solo lineas que comienzan con digito
 --   - Reemplazar coma decimal por punto
---   - Descartar valores NULL
--- Agregacion: AVG diario -> mensual
--- Nota: los meses sin observacion quedan como NULL en Silver.
---       La decision de imputar pertenece a Gold.
+--   - Descartar valores NULL o no positivos
 -- ==========================================================
 \echo 'Procesando SILVER - Manaos...'
 
-INSERT INTO silver.flow_monthly (year, month, manaos_monthly)
+INSERT INTO silver.flow_daily (year, month, day, manaos_daily)
 WITH parsing AS (
     SELECT
         to_timestamp(
@@ -169,19 +163,15 @@ limpieza AS (
     FROM parsing
     WHERE valor_num IS NOT NULL
       AND valor_num > 0
-),
-mensual AS (
-    SELECT
-        EXTRACT(YEAR  FROM fecha_ts)::int AS year,
-        EXTRACT(MONTH FROM fecha_ts)::int AS month,
-        AVG(valor_num)                    AS manaos_monthly
-    FROM limpieza
-    GROUP BY 1, 2
 )
-SELECT year, month, manaos_monthly
-FROM mensual
-ON CONFLICT (year, month)
-DO UPDATE SET manaos_monthly = EXCLUDED.manaos_monthly;
+SELECT
+    EXTRACT(YEAR  FROM fecha_ts)::int AS year,
+    EXTRACT(MONTH FROM fecha_ts)::int AS month,
+    EXTRACT(DAY   FROM fecha_ts)::int AS day,
+    valor_num                         AS manaos_daily
+FROM limpieza
+ON CONFLICT (year, month, day)
+DO UPDATE SET manaos_daily = EXCLUDED.manaos_daily;
 
 \echo 'OK - Manaos'
 
@@ -191,15 +181,13 @@ DO UPDATE SET manaos_monthly = EXCLUDED.manaos_monthly;
 -- ==========================================================
 -- Fuente: bronze.obidos (5 columnas TEXT)
 -- Columnas: id_estacion, nombre, fecha, valor, origen
--- Parsing:  fecha via to_timestamp, valor reemplazando coma
 -- Limpieza:
 --   - Reemplazar coma decimal por punto
 --   - Descartar valores NULL o no positivos
--- Agregacion: AVG diario -> mensual
 -- ==========================================================
 \echo 'Procesando SILVER - Obidos...'
 
-INSERT INTO silver.flow_monthly (year, month, obidos_monthly)
+INSERT INTO silver.flow_daily (year, month, day, obidos_daily)
 WITH parsing AS (
     SELECT
         to_timestamp(fecha, 'DD/MM/YYYY HH24:MI')      AS fecha_ts,
@@ -216,19 +204,15 @@ limpieza AS (
     FROM parsing
     WHERE valor_num IS NOT NULL
       AND valor_num > 0
-),
-mensual AS (
-    SELECT
-        EXTRACT(YEAR  FROM fecha_ts)::int AS year,
-        EXTRACT(MONTH FROM fecha_ts)::int AS month,
-        AVG(valor_num)                    AS obidos_monthly
-    FROM limpieza
-    GROUP BY 1, 2
 )
-SELECT year, month, obidos_monthly
-FROM mensual
-ON CONFLICT (year, month)
-DO UPDATE SET obidos_monthly = EXCLUDED.obidos_monthly;
+SELECT
+    EXTRACT(YEAR  FROM fecha_ts)::int AS year,
+    EXTRACT(MONTH FROM fecha_ts)::int AS month,
+    EXTRACT(DAY   FROM fecha_ts)::int AS day,
+    valor_num                         AS obidos_daily
+FROM limpieza
+ON CONFLICT (year, month, day)
+DO UPDATE SET obidos_daily = EXCLUDED.obidos_daily;
 
 \echo 'OK - Obidos'
 
@@ -241,12 +225,11 @@ DO UPDATE SET obidos_monthly = EXCLUDED.obidos_monthly;
 -- Limpieza:
 --   - Solo lineas que comienzan con digito
 --   - Reemplazar coma decimal por punto
---   - Descartar valores NULL
--- Agregacion: AVG diario -> mensual
+--   - Descartar valores NULL o no positivos
 -- ==========================================================
 \echo 'Procesando SILVER - Tabatinga...'
 
-INSERT INTO silver.flow_monthly (year, month, tabatinga_monthly)
+INSERT INTO silver.flow_daily (year, month, day, tabatinga_daily)
 WITH parsing AS (
     SELECT
         to_timestamp(
@@ -265,19 +248,15 @@ limpieza AS (
     FROM parsing
     WHERE valor_num IS NOT NULL
       AND valor_num > 0
-),
-mensual AS (
-    SELECT
-        EXTRACT(YEAR  FROM fecha_ts)::int AS year,
-        EXTRACT(MONTH FROM fecha_ts)::int AS month,
-        AVG(valor_num)                    AS tabatinga_monthly
-    FROM limpieza
-    GROUP BY 1, 2
 )
-SELECT year, month, tabatinga_monthly
-FROM mensual
-ON CONFLICT (year, month)
-DO UPDATE SET tabatinga_monthly = EXCLUDED.tabatinga_monthly;
+SELECT
+    EXTRACT(YEAR  FROM fecha_ts)::int AS year,
+    EXTRACT(MONTH FROM fecha_ts)::int AS month,
+    EXTRACT(DAY   FROM fecha_ts)::int AS day,
+    valor_num                         AS tabatinga_daily
+FROM limpieza
+ON CONFLICT (year, month, day)
+DO UPDATE SET tabatinga_daily = EXCLUDED.tabatinga_daily;
 
 \echo 'OK - Tabatinga'
 
@@ -289,16 +268,18 @@ DO UPDATE SET tabatinga_monthly = EXCLUDED.tabatinga_monthly;
 -- Estructura del raw_line (separador ';'):
 --   campo 1: fecha (DD/MM/YYYY)
 --   campo 2: caudal mensual (coma como separador decimal)
--- Nota: este CSV ya viene en frecuencia mensual, no diaria.
---       No se agrega, se inserta directamente.
+-- Nota: esta fuente ya viene en frecuencia mensual.
+--       Se inserta con day=1 por convencion para mantener
+--       la estructura de la tabla. Gold lo trata como
+--       valor mensual directamente (sin AVG).
 -- Limpieza:
 --   - Solo lineas que comienzan con digito
 --   - Reemplazar coma decimal por punto
---   - Descartar valores NULL
+--   - Descartar valores NULL o no positivos
 -- ==========================================================
 \echo 'Procesando SILVER - Timbues...'
 
-INSERT INTO silver.flow_monthly (year, month, timbues_monthly)
+INSERT INTO silver.flow_daily (year, month, day, timbues_daily)
 WITH parsing AS (
     SELECT
         to_date(
@@ -321,10 +302,11 @@ limpieza AS (
 SELECT
     EXTRACT(YEAR  FROM fecha)::int AS year,
     EXTRACT(MONTH FROM fecha)::int AS month,
-    valor_num                      AS timbues_monthly
+    1                              AS day,  -- convencion: fuente mensual
+    valor_num                      AS timbues_daily
 FROM limpieza
-ON CONFLICT (year, month)
-DO UPDATE SET timbues_monthly = EXCLUDED.timbues_monthly;
+ON CONFLICT (year, month, day)
+DO UPDATE SET timbues_daily = EXCLUDED.timbues_daily;
 
 \echo 'OK - Timbues'
 

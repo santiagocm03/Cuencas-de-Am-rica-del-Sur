@@ -4,22 +4,24 @@
 -- Proposito : Vista de anomalias estandarizadas (z-scores)
 --             de caudal mensual por estacion.
 --
---             z = (valor_observado - media_mensual) / desv_std_mensual
+--             z = (valor_mensual - media_mensual) / desv_std_mensual
 --
---             La media y desviacion estandar se calculan por
---             estacion y mes del anio (climatologia mensual),
---             usando todos los anios disponibles en Silver.
+--             Ejecuta cuatro operaciones en secuencia:
+--               1. agregacion  — AVG diario -> mensual
+--               2. climatologia — media y desv. std. por estacion-mes
+--               3. imputacion  — NULLs se rellenan con climatologia
+--               4. z-score     — estandariza respecto a climatologia
 --
---             Los meses sin observacion en Silver (NULL) se
---             imputan con la climatologia mensual correspondiente
---             antes de calcular el z-score.
+--             Al ser una VIEW (no tabla), se recalcula
+--             automaticamente cuando Silver cambia.
 --
---             Al ser una VIEW (no tabla), las anomalias se
---             recalculan automaticamente cuando Silver cambia.
+-- Nota sobre Timbues: la fuente ya viene en frecuencia mensual
+--             (day=1 por convencion en Silver). Se trata
+--             directamente como valor mensual sin AVG.
 --
--- Dependencias: silver.flow_monthly (tabla con datos limpios)
+-- Dependencias: silver.flow_daily
 -- Ejecucion :
---   sudo -u postgres psql -d caudales -f sql/gold/05_view_anomalies.sql
+--   psql -d <base> -f sql/gold/05_view_anomalies.sql
 -- Consulta :
 --   SELECT * FROM gold.flow_monthly_anomalies
 --   WHERE year = 2015 ORDER BY month;
@@ -27,31 +29,45 @@
 
 \set ON_ERROR_STOP on
 
--- Eliminar tabla legacy si existe (migracion de tabla a VIEW)
 
 DROP VIEW  IF EXISTS gold.flow_monthly_anomalies;
 
 CREATE OR REPLACE VIEW gold.flow_monthly_anomalies AS
 
--- 1. Normalizar a formato largo: una fila por (year, month, estacion)
---    Solo filas con valor observado (no NULL) para calcular climatologia
-WITH base AS (
-    SELECT year, month, 'calamar'   AS station, calamar_monthly   AS value FROM silver.flow_monthly WHERE calamar_monthly   IS NOT NULL
-    UNION ALL
-    SELECT year, month, 'bolivar',               bolivar_monthly          FROM silver.flow_monthly WHERE bolivar_monthly   IS NOT NULL
-    UNION ALL
-    SELECT year, month, 'manaos',                manaos_monthly           FROM silver.flow_monthly WHERE manaos_monthly    IS NOT NULL
-    UNION ALL
-    SELECT year, month, 'obidos',                obidos_monthly           FROM silver.flow_monthly WHERE obidos_monthly    IS NOT NULL
-    UNION ALL
-    SELECT year, month, 'tabatinga',             tabatinga_monthly        FROM silver.flow_monthly WHERE tabatinga_monthly IS NOT NULL
-    UNION ALL
-    SELECT year, month, 'timbues',               timbues_monthly          FROM silver.flow_monthly WHERE timbues_monthly   IS NOT NULL
+-- 1. Agregacion diaria -> mensual (AVG por estacion-mes)
+--    Timbues se excluye aqui porque ya viene mensual (day=1)
+WITH mensual AS (
+    SELECT
+        year,
+        month,
+        AVG(calamar_daily)   AS calamar_monthly,
+        AVG(bolivar_daily)   AS bolivar_monthly,
+        AVG(manaos_daily)    AS manaos_monthly,
+        AVG(obidos_daily)    AS obidos_monthly,
+        AVG(tabatinga_daily) AS tabatinga_monthly,
+        MAX(timbues_daily)   AS timbues_monthly  -- MAX porque solo hay 1 fila (day=1)
+    FROM silver.flow_daily
+    GROUP BY year, month
 ),
 
--- 2. Climatologia: media y desv. std. por estacion y mes del anio
---    Se calcula SOLO sobre valores observados (no imputados)
---    para no contaminar la referencia climatologica con ella misma
+-- 2. Normalizar a formato largo para calcular estadisticos
+--    Solo valores no NULL para no contaminar la climatologia
+base AS (
+    SELECT year, month, 'calamar'   AS station, calamar_monthly   AS value FROM mensual WHERE calamar_monthly   IS NOT NULL
+    UNION ALL
+    SELECT year, month, 'bolivar',               bolivar_monthly          FROM mensual WHERE bolivar_monthly   IS NOT NULL
+    UNION ALL
+    SELECT year, month, 'manaos',                manaos_monthly           FROM mensual WHERE manaos_monthly    IS NOT NULL
+    UNION ALL
+    SELECT year, month, 'obidos',                obidos_monthly           FROM mensual WHERE obidos_monthly    IS NOT NULL
+    UNION ALL
+    SELECT year, month, 'tabatinga',             tabatinga_monthly        FROM mensual WHERE tabatinga_monthly IS NOT NULL
+    UNION ALL
+    SELECT year, month, 'timbues',               timbues_monthly          FROM mensual WHERE timbues_monthly   IS NOT NULL
+),
+
+-- 3. Climatologia: media y desv. std. por estacion y mes del anio
+--    Calculada SOLO sobre valores observados (no imputados)
 stats AS (
     SELECT
         station,
@@ -62,59 +78,54 @@ stats AS (
     GROUP BY station, month
 ),
 
--- 3. Generar la grilla completa de (year, month, station)
---    para todos los anios presentes en Silver, incluyendo
---    los meses que Silver tiene como NULL
+-- 4. Grilla completa de (year, month, station)
+--    incluye los meses que mensual tiene como NULL
 grilla AS (
     SELECT
-        fm.year,
-        fm.month,
+        m.year,
+        m.month,
         s.station
-    FROM silver.flow_monthly fm
+    FROM mensual m
     CROSS JOIN (SELECT DISTINCT station FROM base) s
 ),
 
--- 4. Traer el valor observado de Silver para cada celda de la grilla.
---    Las celdas sin observacion quedan con value = NULL aqui.
-silver_largo AS (
-    SELECT year, month, 'calamar'   AS station, calamar_monthly   AS value FROM silver.flow_monthly
+-- 5. Traer el valor mensual para cada celda de la grilla
+--    Las celdas sin observacion quedan con value = NULL
+mensual_largo AS (
+    SELECT year, month, 'calamar'   AS station, calamar_monthly   AS value FROM mensual
     UNION ALL
-    SELECT year, month, 'bolivar',               bolivar_monthly          FROM silver.flow_monthly
+    SELECT year, month, 'bolivar',               bolivar_monthly          FROM mensual
     UNION ALL
-    SELECT year, month, 'manaos',                manaos_monthly           FROM silver.flow_monthly
+    SELECT year, month, 'manaos',                manaos_monthly           FROM mensual
     UNION ALL
-    SELECT year, month, 'obidos',                obidos_monthly           FROM silver.flow_monthly
+    SELECT year, month, 'obidos',                obidos_monthly           FROM mensual
     UNION ALL
-    SELECT year, month, 'tabatinga',             tabatinga_monthly        FROM silver.flow_monthly
+    SELECT year, month, 'tabatinga',             tabatinga_monthly        FROM mensual
     UNION ALL
-    SELECT year, month, 'timbues',               timbues_monthly          FROM silver.flow_monthly
+    SELECT year, month, 'timbues',               timbues_monthly          FROM mensual
 ),
 
--- 5. Imputacion: si el valor observado es NULL,
---    se reemplaza con la climatologia mensual correspondiente.
---    COALESCE(observado, climatologia) -> nunca NULL si hay climatologia
+-- 6. Imputacion: NULLs se rellenan con climatologia mensual
+--    es_imputado = TRUE marca los valores imputados para auditoria
 imputado AS (
     SELECT
         g.year,
         g.month,
         g.station,
-        COALESCE(sl.value, st.mean_month) AS value,
-        CASE
-            WHEN sl.value IS NULL THEN TRUE
-            ELSE FALSE
-        END AS es_imputado
+        COALESCE(ml.value, st.mean_month) AS value,
+        CASE WHEN ml.value IS NULL THEN TRUE ELSE FALSE END AS es_imputado
     FROM grilla g
-    JOIN silver_largo sl
-      ON sl.year    = g.year
-     AND sl.month   = g.month
-     AND sl.station = g.station
+    JOIN mensual_largo ml
+      ON ml.year    = g.year
+     AND ml.month   = g.month
+     AND ml.station = g.station
     JOIN stats st
       ON st.station = g.station
      AND st.month   = g.month
 ),
 
--- 6. Calcular z-score sobre la serie imputada
---    NULLIF protege contra division por cero cuando solo hay 1 anio de datos
+-- 7. Z-score: estandariza respecto a la climatologia
+--    NULLIF protege contra division por cero (solo 1 anio de datos)
 anom AS (
     SELECT
         i.year,
@@ -128,7 +139,8 @@ anom AS (
      AND s.month   = i.month
 )
 
--- 7. Pivotar de vuelta a formato wide (una columna por estacion)
+-- 8. Pivotar a formato wide (una columna por estacion)
+--    Columnas *_imputado indican si el valor fue imputado ese mes
 SELECT
     year,
     month,
@@ -138,7 +150,6 @@ SELECT
     MAX(anomaly)     FILTER (WHERE station = 'obidos')    AS obidos_anomaly,
     MAX(anomaly)     FILTER (WHERE station = 'tabatinga') AS tabatinga_anomaly,
     MAX(anomaly)     FILTER (WHERE station = 'timbues')   AS timbues_anomaly,
-    -- Columnas de auditoria: indican que estaciones fueron imputadas ese mes
     BOOL_OR(es_imputado) FILTER (WHERE station = 'calamar')   AS calamar_imputado,
     BOOL_OR(es_imputado) FILTER (WHERE station = 'bolivar')   AS bolivar_imputado,
     BOOL_OR(es_imputado) FILTER (WHERE station = 'manaos')    AS manaos_imputado,
@@ -151,10 +162,5 @@ ORDER BY year, month;
 
 COMMENT ON VIEW gold.flow_monthly_anomalies IS
     'Anomalias estandarizadas (z-scores) de caudal mensual por estacion. '
-    'Los NULLs de Silver se imputan con climatologia mensual antes del calculo. '
-    'Las columnas *_imputado indican si ese mes fue imputado (TRUE) u observado (FALSE).';
-
-SELECT schema_name FROM information_schema.schemata WHERE schema_name = 'gold';
-SELECT table_name FROM information_schema.views WHERE table_schema = 'gold';
-SELECT COUNT(*) FROM silver.flow_monthly;
-
+    'Agrega silver.flow_daily a mensual, calcula climatologia, imputa NULLs '
+    'y calcula z-scores. Las columnas *_imputado indican meses imputados.';
