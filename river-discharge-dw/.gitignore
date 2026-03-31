@@ -1,0 +1,36 @@
+# ===========================
+# Archivos del sistema
+# ===========================
+.DS_Store
+Thumbs.db
+
+# ===========================
+# Configuracion local
+# ===========================
+*.env
+
+# ===========================
+# Archivos temporales
+# ===========================
+*.log
+*.bak
+*.tmp
+
+# ===========================
+# IDEs y editores
+# ===========================
+.vscode/
+.idea/
+
+# ===========================
+# Datos procesados (outputs)
+# ===========================
+# Los outputs del pipeline no se versionan;
+# se regeneran ejecutando los scripts SQL.
+data/processed/
+
+# ===========================
+# Exportaciones y diagramas
+# ===========================
+*.png
+*.pdf
