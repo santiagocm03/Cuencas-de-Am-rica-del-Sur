@@ -8,7 +8,7 @@
 --             ocurre en Gold.
 -- Dependencias: 00_init_schemas.sql
 -- Ejecucion :
---   sudo -u postgres psql -d postgres -f sql/silver/03_ddl.sql
+--   sudo -u postgres psql -d Database -f sql/silver/03_ddl.sql
 -- ==========================================================
 
 \set ON_ERROR_STOP on

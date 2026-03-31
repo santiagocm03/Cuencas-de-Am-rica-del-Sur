@@ -21,7 +21,7 @@
 --               silver.manaos, silver.obidos,
 --               silver.tabatinga, silver.timbues
 -- Ejecucion :
---   sudo -u postgres psql -d postgres -f sql/gold/05_view_anomalies.sql
+--   sudo -u postgres psql -d Database -f sql/gold/05_view_anomalies.sql
 -- Consulta :
 --   SELECT * FROM gold.flow_monthly_anomalies
 --   WHERE year = 2015 ORDER BY month;

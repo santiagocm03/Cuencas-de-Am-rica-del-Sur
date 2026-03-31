@@ -10,7 +10,7 @@ Pipeline con tres capas (Medallion Architecture):
 |------|---------|-----------|
 | **Bronze** | `bronze` | Ingesta cruda de CSVs heterogéneos (sin transformación). Cada tabla refleja la estructura original de la fuente (columnas `TEXT` o `raw_line`). |
 | **Silver** | `silver` | Datos limpios y tipados por estación. Se aplican reglas de calidad, conversión de tipos y filtros básicos. Cada estación tiene su propia tabla. |
-| **Gold** | `gold` | Agregación mensual (promedio), climatología, imputación de huecos y anomalías estandarizadas (z‑scores) en una vista analítica. |
+| **Gold** | `gold` | Agregación mensual (promedio), climatología, imputación de huecos, anomalías estandarizadas (z‑scores) y modelo dimensional (estrella). |
 
 ## Estaciones
 
@@ -24,8 +24,6 @@ Pipeline con tres capas (Medallion Architecture):
 | Timbúes | Paraná | Paraná | Argentina |
 
 ## Estructura del proyecto
-
-
 
 ```
 caudales-dw/
@@ -47,43 +45,14 @@ caudales-dw/
 │ ├── 03_ddl.sql # Tablas silver con tipos correctos
 │ └── 04_insert.sql # Transformación y limpieza
 ├── gold/
-│ └── 05_view_anomalies.sql # Tabla mensual y vista de anomalías
+│ ├── 05_view_anomalies.sql # Tabla mensual y vista de anomalías
+│ └── 06_dim_fact.sql # Modelo dimensional (estrella)
 └── tests/
 ├── test_silver.sql # Validaciones de integridad Silver
-└── test_gold.sql # Tests sobre gold.flow_monthly_anomalies
+├── test_gold.sql # Tests sobre gold.flow_monthly_anomalies
+└── tiempos.sql # Medición de tiempos de ejecución
  
 ```
-
-
-## Ejecución
-
-Todos los scripts se ejecutan desde la raíz del repositorio con `psql`. Ejemplo:
-
-```bash
-# 1. Crear esquemas
-psql -d caudales -f sql/00_init_schemas.sql
-
-# 2. Crear tablas bronze y cargar CSVs
-psql -d caudales -f sql/bronze/01_ddl.sql
-psql -d caudales -f sql/bronze/02_load_insert.sql
-
-# 3. (Opcional) Perfilar tipos de dato
-psql -d caudales -f sql/bronze/03_profiling.sql
-
-# 4. Crear tablas silver y transformar datos
-psql -d caudales -f sql/silver/03_ddl.sql
-psql -d caudales -f sql/silver/04_insert.sql
-
-# 5. Crear tabla mensual y vista de anomalías en gold
-psql -d caudales -f sql/gold/05_view_anomalies.sql
-
-# 6. Ejecutar tests (opcional)
-psql -d caudales -f sql/tests/test_silver.sql
-psql -d caudales -f sql/tests/test_gold.sql
-
-
-> **Nota:** `02_load_insert.sql` usa rutas relativas (`./data/raw/...`), por eso es necesario ejecutar `psql` desde la raiz del repositorio.
-
 
 ## Pipeline de datos
 
@@ -111,6 +80,51 @@ Cada estación conserva su propia tabla. No se imputan huecos en esta capa.
 
 El resultado final es la vista `gold.flow_monthly_anomalies`, que se actualiza automáticamente al cambiar los datos de silver.
 
+### Gold – Modelo dimensional (estrella)
+El script `06_dim_fact.sql` construye un modelo estrella sobre los datos mensuales y sus anomalías:
+
+- **`gold.dim_estacion`** – dimensión de estaciones con atributos como río, cuenca, país, coordenadas.
+- **`gold.dim_tiempo`** – dimensión de tiempo con granularidad mensual (año, mes, nombre_mes, trimestre, semestre).
+- **`gold.fact_caudal_mensual`** – tabla de hechos que relaciona las dimensiones y contiene:
+  - `caudal_observado`: valor original (si existe)
+  - `es_imputado`: indicador de imputación
+  - `z_score`: anomalía estandarizada
+
+Este modelo facilita el análisis multidimensional (cubos OLAP, BI) y cumple con los requisitos de diseño dimensional solicitados.
+
+## Checks de calidad (reglas de integridad)
+
+El pipeline aplica múltiples reglas de calidad en cada etapa para garantizar la confiabilidad de los datos:
+
+### Durante la transformación Silver (`04_insert.sql`)
+- **Valores positivos**: Se descartan caudales ≤ 0 (físicamente imposibles).
+- **Rangos físicos máximos**: Se establecen umbrales superiores basados en registros históricos conocidos:
+  - Calamar (Magdalena): ≤ 16.000 m³/s
+  - Ciudad Bolívar (Orinoco): ≤ 100.000 m³/s
+  - Manaos (Amazonas): ≤ 200.000 m³/s
+  - Óbidos (Amazonas): ≤ 300.000 m³/s
+  - Tabatinga (Amazonas): ≤ 80.000 m³/s
+  - Timbúes (Paraná): ≤ 30.000 m³/s
+- **Fechas válidas**: Solo se aceptan registros con fechas parseables y dentro del período histórico esperado (1900–2030). Para Calamar se excluyen datos posteriores a 2016 debido a un cambio de sensor.
+- **Filtro por estación/serie**: En Calamar se selecciona exclusivamente la serie “Caudal medio diario” de la estación principal, descartando sufijos entre corchetes.
+
+### En las tablas Silver (implícito en la lógica de inserción)
+- **No se permiten duplicados**: El diseño de las tablas silver no tiene restricción de unicidad, pero la transformación asegura que cada combinación de fecha y estación aparezca una sola vez (agregación implícita).  
+- **Conversión de formatos**: Se reemplaza la coma decimal por punto en todas las fuentes que usan coma como separador decimal.
+
+### En la capa Gold (construcción de `gold.flow_monthly` y la vista de anomalías)
+- **Agregación mensual**: Se promedian los caudales diarios para obtener un único valor por mes y estación.
+- **Climatología**: Calculada únicamente con valores observados, evitando contaminación con datos imputados.
+- **Imputación**: Los meses sin dato se completan con la media climatológica correspondiente, y se marca con la bandera `*_imputado`.
+- **Z-score**: Se estandariza cada valor respecto a su propia climatología mensual; se verifica que la media de los z‑scores sea ≈ 0 y la desviación estándar ≈ 1 dentro de tolerancias adaptadas a cada serie.
+
+## Benchmark de tiempos
+
+El script `sql/tests/tiempos.sql` mide los tiempos de ejecución de las etapas principales del pipeline (carga bronze, transformación silver, construcción gold). Para ejecutarlo:
+
+```bash
+psql -d caudales -f sql/tests/tiempos.sql 2>&1 | tee tiempos.log
+
 ## Ejecución
 
 Todos los scripts se ejecutan desde la raíz del repositorio con `psql`. Ejemplo:
@@ -133,9 +147,17 @@ psql -d caudales -f sql/silver/04_insert.sql
 # 5. Crear tabla mensual y vista de anomalías en gold
 psql -d caudales -f sql/gold/05_view_anomalies.sql
 
-# 6. Ejecutar tests (opcional)
+# 6. (Opcional) Construir modelo dimensional (estrella)
+psql -d caudales -f sql/gold/06_dim_fact.sql
+
+# 7. Ejecutar tests (opcional)
 psql -d caudales -f sql/tests/test_silver.sql
 psql -d caudales -f sql/tests/test_gold.sql
+
+# 8. (Opcional) Medir tiempos de ejecución
+psql -d caudales -f sql/tests/tiempos.sql
+
+> **Nota:** `02_load_insert.sql` usa rutas relativas (`./data/raw/...`), por eso es necesario ejecutar `psql` desde la raiz del repositorio.
 
 ## Tecnologias
 
@@ -216,3 +238,31 @@ Valida la tabla gold.flow_monthly y la vista gold.flow_monthly_anomalies:
 - Confirma que los valores imputados tengan anomalía = 0 (por construcción, ya que se imputa con la media climatológica).
 
 Todos los scripts de test detienen la ejecución con EXCEPTION si falla alguna validación, y al final emiten NOTICE de PASS.
+
+### Checks de calidad (reglas de integridad)
+
+El pipeline aplica múltiples reglas de calidad en cada etapa para garantizar la confiabilidad de los datos:
+
+#### Durante la transformación Silver (`04_insert.sql`)
+- **Valores positivos**: Se descartan caudales ≤ 0 (físicamente imposibles).
+- **Rangos físicos máximos**: Se establecen umbrales superiores basados en registros históricos conocidos:
+  - Calamar (Magdalena): ≤ 16.000 m³/s
+  - Ciudad Bolívar (Orinoco): ≤ 100.000 m³/s
+  - Manaos (Amazonas): ≤ 200.000 m³/s
+  - Óbidos (Amazonas): ≤ 300.000 m³/s
+  - Tabatinga (Amazonas): ≤ 80.000 m³/s
+  - Timbúes (Paraná): ≤ 30.000 m³/s
+- **Fechas válidas**: Solo se aceptan registros con fechas parseables y dentro del período histórico esperado (1900–2030). Para Calamar se excluyen datos posteriores a 2016 debido a un cambio de sensor.
+- **Filtro por estación/serie**: En Calamar se selecciona exclusivamente la serie “Caudal medio diario” de la estación principal, descartando sufijos entre corchetes.
+
+#### En las tablas Silver (implícito en la lógica de inserción)
+- **No se permiten duplicados**: El diseño de las tablas silver no tiene restricción de unicidad, pero la transformación asegura que cada combinación de fecha y estación aparezca una sola vez (agregación implícita).  
+- **Conversión de formatos**: Se reemplaza la coma decimal por punto en todas las fuentes que usan coma como separador decimal.
+
+#### En la capa Gold (construcción de `gold.flow_monthly` y la vista de anomalías)
+- **Agregación mensual**: Se promedian los caudales diarios para obtener un único valor por mes y estación.
+- **Climatología**: Calculada únicamente con valores observados, evitando contaminación con datos imputados.
+- **Imputación**: Los meses sin dato se completan con la media climatológica correspondiente, y se marca con la bandera `*_imputado`.
+- **Z-score**: Se estandariza cada valor respecto a su propia climatología mensual; se verifica que la media de los z‑scores sea ≈ 0 y la desviación estándar ≈ 1 dentro de tolerancias adaptadas a cada serie.
+
+Estas reglas están implementadas en los scripts de transformación y son validadas automáticamente por los tests en `sql/tests/test_silver.sql` y `sql/tests/test_gold.sql`.

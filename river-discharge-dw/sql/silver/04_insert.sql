@@ -17,7 +17,7 @@
 --
 -- Dependencias: 03_ddl.sql (silver), 02_load_insert.sql (bronze)
 -- Ejecucion :
---   sudo -u postgres psql -d postgres -f sql/silver/04_insert.sql
+--   sudo -u postgres psql -d Database -f sql/silver/04_insert.sql
 -- ==========================================================
 
 \set ON_ERROR_STOP on

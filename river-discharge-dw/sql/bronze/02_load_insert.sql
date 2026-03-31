@@ -6,7 +6,7 @@
 -- Dependencias: 01_ddl.sql (tablas bronze creadas)
 -- Ejecucion :
 --   Ejecutar desde la raiz del repositorio:
---   sudo -u postgres psql -d postgres -f sql/bronze/02_load_inserts.sql
+--   sudo -u postgres psql -d Database -f sql/bronze/02_load_inserts.sql
 --
 --   Las rutas son relativas al directorio de trabajo (CWD),
 --   por eso es necesario ejecutar desde la raiz del repo
